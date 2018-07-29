@@ -1,0 +1,345 @@
+---
+title: "sercan1try"
+author: "Murat Ozan Aydin"
+date: "July 23, 2018"
+output: word_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Activating all the cores of the CPU.
+```{r}
+library(parallel)
+library(doMC)
+
+numCores <- detectCores()
+registerDoMC(cores = numCores)
+```
+
+Loading Libraries
+```{r}
+library(tidyverse)
+library(dplyr)
+library(plotly)
+library(knitr)
+library(ggthemes)
+library(highcharter)
+library(igraph)
+library(ggplot2)
+library(qgraph)
+library(gplots)
+library(caret)
+library(RANN)
+library(mice)
+library(corrplot)
+library(stringr)
+library(tictoc)
+
+```
+
+
+Readig the Train Set
+```{r}
+#tictoc keeps track of time.
+tic("total")
+tic("loading the train data set")
+train<-read.csv("application_train.csv",header=T, na.strings=c("","NA"))
+target<-as.factor(train[,2])
+toc()
+#test<-read.csv("application_test.csv")
+#str(train)
+#which(is.na(train$OWN_CAR_AGE))
+
+```
+
+Sampling 70 of the train set. 
+
+```{r}
+#sample<-sample(1:nrow(train),nrow(train)*0.03,rep=FALSE)
+
+library(caret)
+sample <- createDataPartition(target, p = .7, 
+                                  list = FALSE)
+train<-train[sample,]
+#test = train[-sample,]
+
+trainY<-train[,2]
+#testY<-test[,2]
+
+train<-train[,-c(1,2)]
+#test<-test[,-c(1,2)]
+#str(train)
+#rm(testY,test); 
+#cleaning up the memory
+gc()
+```
+
+
+Seperating the Flag variables.
+```{r}
+#identifying flags and converting them to factors
+flags1 <- str_subset(names(train), "FLAG_DOC")
+flags2 <- str_subset(names(train), "(?!NFLAG_)(?!FLAG_DOC)(?!_FLAG_)FLAG_")
+Flags1DF = apply(train[ , names(train) %in% flags1] ,2,factor)
+Flags2DF = apply(train[ , names(train) %in% flags2] ,2,factor)
+
+#combining the 2 flag DFs for future use.
+flagFull<-cbind.data.frame(Flags1DF,Flags2DF)
+
+dim(Flags1DF)
+dim(Flags2DF)
+dim(flagFull)
+#str(flagDF)
+
+#excluding the flags
+trainNoFlags = train[ , !(names(train) %in% flags1)]
+trainNoFlags = trainNoFlags[ , !(names(trainNoFlags) %in% flags2)]
+#after removing flags there are 92 columns left.
+dim(trainNoFlags)
+
+#str(trainNoFlags)
+
+#removing data sets and other elements  that we dont need
+rm(flags1,flags2,Flags1DF,Flags2DF,sample)
+gc
+
+```
+
+
+Breaking Train in to Numerical and Factor data sets.
+```{r}
+
+#Next 2 steps is to group factor variables in to a data frame . 
+#Note: In trainFac there are columns that have N/As
+trainFac1 <- trainNoFlags[,sapply(trainNoFlags, is.factor)]
+
+#combine flag with trainFac(this data set will have all 42 factor predictors.)
+trainFac<-cbind(trainFac1,flagFull)
+dim(trainFac)
+#seperating numericals for preprocession(78 predictors)
+trainNum <- trainNoFlags[,sapply(trainNoFlags, is.numeric)]
+dim(trainNum)
+rm(trainNoFlags,trainFac1,flagFull)
+
+```
+
+Visualizing  Missing values.
+```{r}
+
+
+#there is an error in the DAYS_EMPLOYED column , following code fixes that issus.
+trainNum$DAYS_EMPLOYED=replace(trainNum$DAYS_EMPLOYED,trainNum$DAYS_EMPLOYED == 365243,NA)
+
+
+#Number of missing values in the training data set
+sum(is.na(trainNum))
+options(scipen=1)
+#Calculating the percentage of missing data
+missing_data <- as.data.frame(sort(sapply(trainNum, function(x) sum(is.na(x))),decreasing = T))
+
+
+#percentage of missing data by column
+missing_data <- (missing_data/nrow(trainNum))*100
+
+#naming the column as missingvaluesPercentage
+colnames(missing_data)[1] <- "missingvaluesPercentage"
+#creating a new column with the missing percentages.
+missing_data$features <- rownames(missing_data)
+#m=sort(sapply(tr, function(x) sum(is.na(x))),decreasing = T)
+#Alternatively the following can be used.
+#missing<-as.data.frame(sort(apply(tr,2, function(x) sum(is.na(x))),decreasing = T))
+
+ggplot(missing_data[missing_data$missingvaluesPercentage>40,],aes(reorder(features,-missingvaluesPercentage),missingvaluesPercentage,fill= features)) +
+  geom_bar(stat="identity") +theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = "none") + ylab("Percentage of missingvalues") +
+  xlab("Feature") + ggtitle("Understanding Missing Data")
+
+
+```
+
+Removing variables that are missing more 30% of their value. 
+Feature reduction from 78 to 57. There are 19 columns that are missing more than 30 %
+
+```{r}
+#filtering the columns that are missing more than 30% .
+fltrdMissing<-missing_data %>%
+            filter(missingvaluesPercentage<=.3)
+dim(trainNum)
+
+#Extracting the unique values in to a list
+filteredColNames<-unique(fltrdMissing$features)
+
+#excluding the variables that are missing more than 30%
+trainNumFltrd= trainNum[ , !names(trainNum) %in% filteredColNames]
+dim(trainNumFltrd)
+rm(trainNum,missing_data,fltrdMissing,filteredColNames)
+
+```
+
+Removing near zero variables. 
+Feature reduction from 57 to 45.
+
+```{r}
+NZV = nearZeroVar(trainNumFltrd)
+dim(trainNumFltrd)
+trainNumFltrdNZV = trainNumFltrd[, -NZV]
+#num03NZV2 = num03[, NZV]
+dim(trainNumFltrdNZV)
+rm(trainNumFltrd);gc()
+```
+In this next chunk trying different imputation techniques. 
+
+```{r}
+# tic("Using KnnImpute from Caret")
+# knnImp <- preProcess(trainNumFltrdNZV,
+#                    method = c("knnImpute"))
+# ImptdFltrdTrain1 <- predict(knnImp, trainNumFltrdNZV)
+# sum(is.na(ImptdFltrdTrain))
+# toc()
+# 
+# #Trying random Sampling this one took around 40 min at maxit 50. 
+# imputed_Data <- mice(trainNumFltrdNZV, m=1, maxit = 3, method = 'sample', seed = 500)
+# ImptdFltrdTrain2<-complete(imputed_Data,1)
+# 
+# tic("rf imputation with maxit 3")
+# imputed_Data2 <- mice(trainNumFltrdNZV, m=1, maxit = 3, method = 'rf', seed = 500)
+# ImptdFltrdTrain3<-complete(imputed_Data2,1)
+# toc()
+# 
+# 
+# tic("pmm imputation with maxit 3")
+# imputed_Data2 <- mice(trainNumFltrdNZV, m=1, maxit = 3, method = 'pmm', seed = 500)
+# ImptdFltrdTrain4<-complete(imputed_Data2,1)
+# toc()
+
+
+tic("linear regression imputation with maxit 3")
+imputed_Data2 <- mice(trainNumFltrdNZV, m=1, maxit = 3, method = 'norm.nob', seed = 500)
+ImptdFltrdTrain5<-complete(imputed_Data2,1)
+toc()
+
+
+for (i in 1:45)
+{
+  hist(trainNumFltrdNZV[,i],xlab=colnames(trainNumFltrdNZV)[i])
+}
+rm(trainNumFltrdNZV)
+```
+
+
+
+
+```{r}
+train<-cbind(ImptdFltrdTrain5,trainY)
+library(caret)
+sample <- createDataPartition(trainY, p = .7, 
+                                  list = FALSE)
+train<-train[sample,]
+test = train[-sample,]
+
+trainY<-train[,46]
+testY<-test[,46]
+
+rm(sample,trainNumFltrdNZV,d,i,target,ImptdFltrdTrain5)
+```
+
+
+```{r}
+#twoClassSummary() in caret calculates sensitivity,specificity and ROC AUC. Use it in trainControl()
+# under summaryFunction  = twoClassSummary() and use as option in train(trControl = )
+
+library(C50)
+library(caret)
+library(pROC)
+ctrl = trainControl(  method = "cv",
+                      number = 5,
+                      classProbs = TRUE)
+  
+grid = expand.grid(interaction.depth = seq(1,7, by = 2),
+                   n.trees = seq(100,1000, by = 50),
+                   shrinkage = c(0.01,0.1),
+                   n.minobsinnode = c(1,10,100))
+
+  set.seed(1)
+gbmTune = train( x=train03f,y=target03train,
+                 method = "gbm",
+                 metric = "ROC",   #We are telling which metyric we want to optimize the model for
+                                    # default is maximize, we can set maximize = FALSE to minimize metrics
+                 tuneGrid = grid,
+                 verbose = FALSE,
+                 trControl = ctrl1)
+                 
+
+```
+
+
+```{r}
+ctrl1 = trainControl(method = "repeatedcv", repeats = 5, sampling="smote")
+
+gbmTune = train( x=train03f,y=target03train, 
+                 
+                 method = "gbm",
+                 verbose = FALSE,
+                 trControl = ctrl1)
+
+```
+
+
+
+```{r}
+gbmTune$finalModel
+
+#To predict using this model on test data
+
+gbmPred = predict(gbmTune,test03f)
+#library(prc)
+#class probabilities
+gbmProbs = predict(gbmTune, test03f, type = "prob")
+str(gbmProbs)
+head(gbmProbs)
+
+confusionMatrix(gbmPred,target03test,positive = "1")
+
+rocCurve = roc(response = target03test,
+               predictor = gbmProbs[,1],
+               levels = rev(levels(target03test)))
+
+rocCurve
+plot(rocCurve)
+plot(rocCurve,
+     print.thres = c(.5,.2),
+     print.thres.pch = 16,
+     print.thres.cex = 1.2)
+
+```
+
+
+
+```{r}
+library(caret)
+
+rf_model<-train(x=train03f,y=target03train,method="rf",
+                trControl=trainControl(method="cv",number=5),
+                prox=TRUE,allowParallel=TRUE)
+print(rf_model)
+names(rf_model)
+
+randomPred = predict(rf_model,test03f)
+varImp(rf_model)
+
+confusionMatrix(randomPred,target03test,positive = "1")
+
+
+```
+
+```{r}
+
+
+toc()
+
+```
+
+
