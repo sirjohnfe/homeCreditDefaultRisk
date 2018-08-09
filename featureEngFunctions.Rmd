@@ -1,0 +1,726 @@
+---
+title: "featureEngineering"
+author: "Demir_Sercan"
+date: "8/4/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Activating all the cores of the CPU.
+```{r}
+library(parallel)
+library(doMC)
+
+numCores <- detectCores()
+registerDoMC(cores = numCores)
+```
+
+Loading Libraries
+```{r}
+require(tidyverse)
+require(dplyr)
+require(plotly)
+require(knitr)
+require(ggthemes)
+require(highcharter)
+require(igraph)
+require(ggplot2)
+require(qgraph)
+require(gplots)
+require(caret)
+require(RANN)
+require(mice)
+require(corrplot)
+require(stringr)
+require(tictoc)
+require(MLmetrics)
+
+```
+
+
+Readig the Train Set
+```{r}
+#tictoc keeps track of time.
+tic("total Run Time")
+tic("loading the train data set")
+train<-read.csv("application_train.csv",header=T, na.strings=c("","NA"))
+
+#I use this train1 later in the code.
+train1<-train
+sum(is.na(train))
+target<-train[,2]
+SK_ID_CURR<-train[,1]
+train<-train[,-c(1,2)]
+toc()
+#head(train)
+gc()
+
+```
+
+
+
+
+Seperating the Flag variables.
+```{r}
+#identifying flags and converting them to factors
+flags1 <- str_subset(names(train), "FLAG_DOC")
+flags2 <- str_subset(names(train), "(?!NFLAG_)(?!FLAG_DOC)(?!_FLAG_)FLAG_")
+Flags1DF = apply(train[ , names(train) %in% flags1] ,2,factor)
+Flags2DF = apply(train[ , names(train) %in% flags2] ,2,factor)
+
+#combining the 2 flag DFs for future use.
+flagFull<-cbind.data.frame(Flags1DF,Flags2DF)
+
+dim(Flags1DF)
+dim(Flags2DF)
+dim(flagFull)
+#str(flagDF)
+
+#excluding the flags
+trainNoFlags = train[ , !(names(train) %in% flags1)]
+trainNoFlags = trainNoFlags[ , !(names(trainNoFlags) %in% flags2)]
+#after removing flags there are 92 columns left.
+dim(trainNoFlags)
+
+#str(trainNoFlags)
+
+#removing data sets and other elements  that we dont need
+#rm(flags1,flags2,Flags1DF,Flags2DF,sample)
+gc
+
+```
+
+
+Breaking Train in to Numerical and Factor data sets.
+```{r}
+
+#Next 2 steps is to group factor variables in to a data frame . 
+#Note: In trainFac there are columns that have N/As
+trainFac1 <- trainNoFlags[,sapply(trainNoFlags, is.factor)]
+
+#combine flag with trainFac(this data set will have all 42 factor predictors.)
+
+
+#seperating numericals for preprocession(78 predictors)
+trainNum <- trainNoFlags[,sapply(trainNoFlags, is.numeric)]
+
+trainNum<-cbind(trainNum,flagFull,trainFac1)
+rm(trainNoFlags)#,flagFull)
+
+```
+
+
+```{r}
+#removing Fondkapremont,house type mode, walls material mode, emergency state mode.
+
+#trainFac1<-trainFac1[,-c(11:14)]
+# trainFac<-cbind(trainFac1,flagFull)
+# dim(trainFac)
+# tic("rf imputation for Factors maxit 3")
+# imputed_Data <- mice(trainFac, m=1, maxit = 1, method = 'pmm', seed = 500)
+# ImptdFactor<-complete(imputed_Data,1)
+# toc()
+# save(imputed_Data, file = "imputed_DataFac.rda")
+# 
+# load("imputed_DataFac.rda")
+
+```
+
+Visualizing  Missing values.
+```{r}
+
+
+#there is an error in the DAYS_EMPLOYED column , following code fixes that issus.
+trainNum$DAYS_EMPLOYED=replace(trainNum$DAYS_EMPLOYED,trainNum$DAYS_EMPLOYED == 365243,NA)
+
+
+#Number of missing values in the training data set
+sum(is.na(trainNum))
+options(scipen=1)
+#Calculating the percentage of missing data
+missing_data <- as.data.frame(sort(sapply(trainNum, function(x) sum(is.na(x))),decreasing = T))
+
+
+#percentage of missing data by column
+missing_data <- (missing_data/nrow(trainNum))*100
+
+#naming the column as missingvaluesPercentage
+colnames(missing_data)[1] <- "missingvaluesPercentage"
+#creating a new column with the missing percentages.
+missing_data$features <- rownames(missing_data)
+#m=sort(sapply(tr, function(x) sum(is.na(x))),decreasing = T)
+#Alternatively the following can be used.
+#missing<-as.data.frame(sort(apply(tr,2, function(x) sum(is.na(x))),decreasing = T))
+
+ggplot(missing_data[missing_data$missingvaluesPercentage>40,],aes(reorder(features,-missingvaluesPercentage),missingvaluesPercentage,fill= features)) +
+  geom_bar(stat="identity") +theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = "none") + ylab("Percentage of missingvalues") +
+  xlab("Feature") + ggtitle("Understanding Missing Data")
+
+
+```
+
+Removing variables that are missing more 30% of their value. 
+Feature reduction from 78 to 57. There are 19 columns that are missing more than 30 %
+
+```{r}
+#filtering the columns that are missing more than 30% .
+fltrdMissing<-missing_data %>%
+            filter(missingvaluesPercentage<=.3)
+dim(trainNum)
+
+#Extracting the unique values in to a list
+filteredColNames<-unique(fltrdMissing$features)
+
+#excluding the variables that are missing more than 30%
+trainNumFltrd= trainNum[ , !names(trainNum) %in% filteredColNames]
+dim(trainNumFltrd)
+#rm(trainNum,missing_data,fltrdMissing,filteredColNames)
+
+```
+
+Removing near zero variables. 
+Feature reduction from 57 to 45.
+
+```{r}
+NZV = nearZeroVar(trainNumFltrd)
+dim(trainNumFltrd)
+trainNumFltrdNZV = trainNumFltrd[, -NZV]
+#num03NZV2 = num03[, NZV]
+dim(trainNumFltrdNZV)
+#rm(trainNumFltrd);gc()
+
+```
+
+
+```{r}
+
+NumVsFiltered<-function(x){
+trainNumFltrdNZVSK<-cbind(x,SK_ID_CURR)
+}
+trainNumFltrd<-NumVsFiltered(trainNumFltrdNZV)
+trainNum<-NumVsFiltered(trainNum)
+dim(trainNum)
+head(trainNum)
+```
+
+
+
+
+--------------------FEATURE ENGINEERING--------------------------------------------
+
+
+```{r cars}
+bbalance <- read_csv("bureau_balance.csv") 
+bureau <- read_csv("bureau.csv")
+cc_balance <- read_csv("credit_card_balance.csv")
+payments <- read_csv("installments_payments.csv") 
+pc_balance <- read_csv("POS_CASH_balance.csv")
+prev <- read_csv("previous_application.csv")
+head(train)
+```
+
+
+
+
+Working with Bureau data
+```{r}
+buraueLastMonth<-bbalance%>%
+  filter(MONTHS_BALANCE==-1)
+
+
+bureauFiltered<-bureau[,-c(3,4,15,16,17)]
+
+bureauInfo<-bureauFiltered%>%
+  mutate_if(is.character, funs(factor(.) %>% as.integer))%>%
+  left_join(buraueLastMonth, by="SK_ID_BUREAU")%>%
+  select(-STATUS,-MONTHS_BALANCE,-SK_ID_BUREAU)
+
+fn <- funs(mean, .args = list(na.rm = TRUE))
+bureauAvg<-bureauInfo%>%
+  group_by(SK_ID_CURR)%>%
+  summarise_all(fn)
+bureauAvg<-as.data.frame(bureauAvg)
+
+
+
+for(i in 1:ncol(bureauAvg)){
+  bureauAvg[is.nan(bureauAvg[,i]), i] <- mean(bureauAvg[,i], na.rm = TRUE)
+}
+
+str(bureauInfo)
+head(bbalance)
+
+head(bureauInfo)
+head(bureau,10)
+```
+
+
+
+Working with credit card data.
+```{r}
+
+#looking at the last month payment activity . Amt_Balance/Limit. Creating a percentage score that indicates how close the individual is close to maximizing their limit. 0 is good score 1 is bad. 
+creditSum<-cc_balance %>%
+  #mutate_if(MONTHS_BALANCE=-1,BalLim=AMT_BALANCE/AMT_CREDIT_LIMIT_ACTUAL)
+  mutate(MONTHS_BALANCE=-1) %>%
+  mutate(balLimCurProp=AMT_BALANCE/AMT_CREDIT_LIMIT_ACTUAL)
+creditSum=creditSum[,c(1,2,4,24)]
+
+library(sqldf)
+creditSumBalLim<-sqldf("select SK_ID_PREV,SK_ID_CURR ,AVG(balLimCurProp) as aveBalLimCurPropCRED
+                      from creditSum
+                      group by SK_ID_CURR ")
+
+
+
+
+
+
+#second score is created fromt the percentage of the ability of minimum payment  succesfully made. 
+creditSum2<-cc_balance %>% 
+   mutate(flagMin=ifelse(AMT_PAYMENT_CURRENT>=AMT_INST_MIN_REGULARITY,1,0)) %>% 
+   group_by(SK_ID_PREV) 
+   
+
+creditSum3<-sqldf("select SK_ID_PREV,SK_ID_CURR ,sum(flagMin)/count(flagMin) as PercentMinPaymMade
+                      from creditSum2
+                      group by SK_ID_PREV ")
+
+creditSum4<-sqldf("select SK_ID_PREV,SK_ID_CURR ,AVG(PercentMinPaymMade) as AvgPercMinPaymMadeCRED
+                      from creditSum3
+                      group by SK_ID_CURR ")
+
+
+
+creditSum3<-as.data.frame(creditSum3)
+
+creditSum3[is.na(creditSum3)]<-1
+
+#removing NaN . Theses people look like they paid off their credit card balances. 
+creditSum <- creditSum %>% 
+  filter (! creditSum$balLimCurProp=='NaN' )
+  
+
+
+creditCardFeatures<-creditSumBalLim %>%
+  select(-SK_ID_PREV)%>%
+  left_join(creditSum4, by="SK_ID_CURR")%>%
+  select(-SK_ID_PREV)
+
+
+
+head(creditCardFeatures)
+
+```
+
+
+
+
+Installment Table
+
+
+```{r}
+#Calculated a score for each account. Total Amount paid divided by total amount due since the loan became active. 
+#Took the average off all the account scores for each person
+InstSum1<-sqldf("select SK_ID_PREV,SK_ID_CURR ,AMT_INSTALMENT  , sum(AMT_PAYMENT) as AMT_PAYMENT_REQ 
+                      from payments
+                      group by NUM_INSTALMENT_NUMBER, SK_ID_PREV")
+
+Install<-sqldf("select SK_ID_PREV,SK_ID_CURR , sum(AMT_INSTALMENT) /sum(AMT_PAYMENT_REQ )*100 as averageLoanPaid
+                      from InstSum1
+                      group by SK_ID_PREV")
+InstallmentSum<-sqldf("select SK_ID_CURR , AVG(averageLoanPaid) as aveLoanPaidScoreINSTALL
+                            from Install
+                            group by SK_ID_CURR")  
+
+head(InstallmentSum)
+```
+
+
+POS_CASH Balance
+```{r}
+#Number installments paid / sum of total installment count.
+
+POScash<-sqldf("select SK_ID_PREV,SK_ID_CURR ,CNT_INSTALMENT  , min(CNT_INSTALMENT_FUTURE) as paymentsLeft
+                      from pc_balance
+                      group by SK_ID_PREV")
+POScashSum<-sqldf("select SK_ID_CURR , (1-(sum(paymentsLeft)/sum(CNT_INSTALMENT)))*100 as percentPaidPOS
+                      from POScash
+                      group by SK_ID_CURR")
+
+
+head(POScashSum)
+
+```
+
+
+Previous Application Table
+```{r}
+
+
+
+
+prevSum1<-sqldf("select SK_ID_CURR ,NAME_CONTRACT_STATUS,
+                CASE WHEN   NAME_CONTRACT_STATUS=='Refused'
+                     THEN 1 ELSE 0 END as FlagRefused
+                      from prev")
+prevSum<-sqldf("select SK_ID_CURR ,sum(FlagRefused) as refusalCountScorePREV
+                      from prevSum1
+                      group by SK_ID_CURR")
+
+
+
+
+head(prevSum)
+
+
+```
+
+
+
+
+
+
+
+
+----------------------FEATURE ENGINEERING ENDS-----------------------------
+
+
+Combining  prevSum, POScashSum, Installment , creditCardFeature and Train
+```{r}
+
+#rm(bbalance,bureau,bureauFiltered,bureauInfo,cc_balance,Install,InstSum1,payments,pc_balance,POScash,prev,prevSum1,result,resultBureau)
+
+combine<-function(data){
+    trainCombined <- data %>% 
+       
+      left_join(prevSum, by = "SK_ID_CURR") %>% 
+    
+      left_join(POScashSum, by = "SK_ID_CURR") %>% 
+    
+      left_join(InstallmentSum, by = "SK_ID_CURR") %>% 
+    
+      left_join(creditCardFeatures, by = "SK_ID_CURR")
+}
+trainNum<-trainNum[,-122]
+filtered<-combine(trainNumFltrd)
+unfiltered<-combine(trainNum)
+
+
+```
+Joining with Bureau 
+```{r}
+trainCombined2 <- filtered %>% 
+  left_join(select(train1,SK_ID_CURR,AMT_INCOME_TOTAL),by="SK_ID_CURR")
+
+#trainCombined2[is.na(trainCombined[,50]), 50] <- median(trainCombined[,50], na.rm = TRUE)
+
+for(i in 1:ncol(trainCombined2)){
+  trainCombined2[is.na(trainCombined2[,i]), i] <- mean(trainCombined2[,i], na.rm = TRUE)
+}
+combine2<-function (data){
+      trainCombined3<-data %>% 
+        left_join(bureauAvg, by = "SK_ID_CURR") %>% 
+        mutate(creditSUM_Income=AMT_CREDIT_SUM/AMT_INCOME_TOTAL)%>%
+        mutate(creditSUMlimit_Income=AMT_CREDIT_SUM_LIMIT/AMT_INCOME_TOTAL)%>%
+        mutate(creditSUMDebt_Income=AMT_CREDIT_SUM_DEBT/AMT_INCOME_TOTAL)%>%
+        mutate(creditSUMOverdue_Income=AMT_CREDIT_SUM_OVERDUE/AMT_INCOME_TOTAL)%>%
+        select(-AMT_CREDIT_SUM,-AMT_CREDIT_SUM_DEBT,-AMT_CREDIT_SUM_LIMIT,-AMT_CREDIT_SUM_OVERDUE)%>% 
+        mutate_all(funs(ifelse(is.nan(.), NA, .))) %>% 
+        mutate_all(funs(ifelse(is.infinite(.), NA, .)))
+      
+}
+#following data is to use it with logistic regression it is filtered and imputed.
+filteredImpData<-combine2(trainCombined2)
+
+for(i in 1:ncol(filteredImpData)){
+  
+  filteredImpData[is.na(filteredImpData[,i]), i] <- mean(filteredImpData[,i], na.rm = TRUE)
+}
+
+
+
+#following data is to use with XGB 
+unfilteredCombined<-combine2(unfiltered)
+
+
+
+
+#head(bureauAvg)
+#head(trainCombined3)
+
+
+dataFiltImp<-cbind(filteredImpData,target)
+dataUnFiltImp<-cbind(unfilteredCombined,target)
+
+
+#train<-select(data,-SK_ID_CURR)
+
+
+#write.csv(data, file = "data1.csv")
+#data<-read.csv("data1.csv",header=T, na.strings=c("","NA"))
+
+
+```
+
+
+
+Creating 2 train and test sets for filtered and unfiltered data.
+```{r}
+library(caret)
+
+
+#train$aveBalLimCurPropCRED[!is.finite(trainX$aveBalLimCurPropCRED)] <- 0.2575954
+
+sample <- createDataPartition(target, p = .8, 
+                                  list = FALSE)
+train<-dataFiltImp[sample,]
+
+trainX<-select(train,-target)
+trainY<-target[sample]
+
+test<-dataFiltImp[-sample,]
+testX<-select(test,-target)
+testY<-target[-sample]
+
+
+```
+
+Model 1 logistic Regression
+```{r}
+#this model ran in 2 min
+
+ library(pROC)
+testY<-as.factor(testY)
+trainY<-as.factor(trainY)
+
+
+tic("Logistic Regression no treatment for imbalance data")
+set.seed(1988)
+logisticReg <- train(x=trainX,y=trainY,
+ method = "glm",
+ trControl = trainControl(method = "cv"))
+toc()
+names(logisticReg)
+logisticReg$modelInfo
+
+tic("Logistic Regression with down sampling")
+set.seed(1988)
+logisticRegDown <- train(x=trainX,y=trainY,
+ method = "glm",
+ trControl = trainControl(method = "cv", sampling = "down"))
+toc()
+```
+
+
+
+
+```{r}
+logPred1Class <- predict(logisticReg, newdata = testX)
+logPred1Prob <- predict(logisticReg, newdata = testX,type="prob")
+
+logPred2Class  <- predict(logisticRegDown, newdata = testX)
+logPred2Prob  <- predict(logisticRegDown, newdata = testX,type="prob")
+#Confusion matrix for logistic regression (No downsampling)
+
+confusionMatrix(logPred1Class,testY,positive = "1")
+confusionMatrix(logPred2Class,testY,positive = "1")
+
+
+rocCurveNoDown = roc(response = testY,
+               predictor = logPred1Prob[,1],
+               levels = rev(levels(testY)))
+rocCurveNoDown
+
+rocCurveDown = roc(response = testY,
+               predictor = logPred2Prob[,1],
+               levels = rev(levels(testY)))
+rocCurveDown
+
+plot(rocCurveDown)
+plot(rocCurveDown,
+     print.thres = c(.5,.2),
+     print.thres.pch = 16,
+     print.thres.cex = 1.2)
+
+F1_Score(y_pred = logPred1Class, y_true = testY, positive = "1")
+F1_Score(y_pred = logPred2Class, y_true = testY, positive = "1")
+```
+
+
+
+
+
+
+```{r}
+testY<-as.factor(testY)
+trainY<-as.factor(trainY)
+
+rfRegDown <- train(x=trainX,y=trainY,
+ method = "rf",
+ trControl = trainControl(method = "cv", sampling = "down"))
+
+names(rfRegDown)
+
+rfPredProb  <- predict(rfRegDown, newdata = testX,type="prob")
+
+rfPred  <- predict(rfRegDown, newdata = testX)
+confusionMatrix(rfPred,testY,positive = "1")
+
+
+rocCurverfDown = roc(response = testY,
+               predictor = rfPredProb[,1],
+               levels = rev(levels(testY)))
+rocCurverfDown
+
+
+F1_Score(y_pred = rfPred, y_true = testY, positive = "1")
+dim(testX)
+```
+
+
+
+
+Preparing Train and test with unfiltered and not imputed data(will be used in XGboost)
+```{r}
+library(caret)
+
+
+#train$aveBalLimCurPropCRED[!is.finite(trainX$aveBalLimCurPropCRED)] <- 0.2575954
+
+sample <- createDataPartition(target, p = .8, 
+                                  list = FALSE)
+train<-dataUnFiltImp[sample,]
+
+train<-select(train,-SK_ID_CURR)
+trainX<-select(train,-target)
+trainY<-target[sample]
+test<-dataUnFiltImp[-sample,]
+
+testX<-select(test,-target)
+testY<-target[-sample]
+head(trainX)
+str(trainY)
+dim(trainX)
+```
+
+
+XGb
+```{r}
+
+trainX<-as.matrix(trainX)
+testX<-as.matrix(testX)
+
+library(tidyverse)
+library(xgboost)
+library(magrittr)
+cat("Preparing data...\n")
+dtest <- xgb.DMatrix(data = testX)
+
+
+dtrain <- xgb.DMatrix(data = trainX, label = trainY)
+dval <- xgb.DMatrix(data = testX, label = testY)
+cols <- colnames(testX)
+
+
+
+#---------------------------
+cat("Training model...\n")
+p <- list(objective = "binary:logistic",
+          booster = "gbtree",
+          eval_metric = "auc",
+          nthread = 4,
+          eta = 0.05,
+          max_depth = 6,
+          min_child_weight = 30,
+          gamma = 0,
+          subsample = 0.85,
+          colsample_bytree = 0.7,
+          colsample_bylevel = 0.632,
+          alpha = 0,
+          lambda = 0,
+          nrounds = 2000)
+
+set.seed(0)
+m_xgb <- xgb.train(p, dtrain, p$nrounds, list(val = dval), print_every_n = 50, early_stopping_rounds = 300)
+
+
+
+#save(m_xgb, file = "xgb62var0787.rda")
+xgb.importance(cols, model=m_xgb) %>% 
+   xgb.plot.importance(top_n = 30)
+
+xgbPredProb  <- predict(m_xgb, newdata = testX,type="prob")
+
+predxgb <- ifelse(xgbPredProb < 0.5, 0, 1)
+
+
+
+confusionMatrix(as.factor(predxgb),as.factor(testY),positive = "1")
+
+
+rocCurverfDown = roc(response = testY,
+               predictor = rfPredProb[,1],
+               levels = rev(levels(testY)))
+rocCurverfDown
+
+
+```
+
+
+```{r}
+# trainY<-as.factor(trainY)
+# #This model ran for 64min.
+# tic("Model-1 GBM")
+# require(C50)
+# library(caret)
+# require(pROC)
+# require(gbm)
+# 
+# ctrl1 = trainControl(method = "repeatedcv", repeats = 1 )
+# 
+# gbmTune = train( x=trainX,y=trainY, 
+#                  preProcess = c("range"),
+#                  method = "gbm",
+#                  verbose = FALSE,
+#                  allowParallel=TRUE,
+#                  trControl = ctrl1)
+# toc()
+# 
+# save(gbmTune, file = "gbm50varPlain.rda")
+```
+
+Model #1-GBM Results
+
+```{r}
+# gbmTune$finalModel
+# 
+# #To predict using this model on test data
+# 
+# gbmPred = predict(gbmTune,testX)
+# #library(prc)
+# #class probabilities
+# gbmProbs = predict(gbmTune, testX, type = "prob")
+# str(gbmProbs)
+# head(gbmProbs)
+# 
+# confusionMatrix(gbmPred,testY,positive = "1")
+# 
+# rocCurve = roc(response = testY,
+#                predictor = gbmProbs[,1],
+#                levels = rev(levels(testY)))
+# 
+# rocCurve
+# plot(rocCurve)
+# plot(rocCurve,
+#      print.thres = c(.5,.2),
+#      print.thres.pch = 16,
+#      print.thres.cex = 1.2)
+
+```
+
+
